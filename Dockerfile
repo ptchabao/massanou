@@ -1,71 +1,74 @@
-# Étape de construction
-FROM composer:2.6 as build
-WORKDIR /app
+FROM php:8.3-cli AS base
 
-# Copier les fichiers de dépendances
-COPY composer.json composer.lock ./
-
-# Installer les dépendances PHP (sans les dépendances de développement)
-RUN composer install --no-dev --no-interaction --no-progress --optimize-autoloader
-
-# Étape d'exécution
-FROM php:8.2-fpm
-
-# Variables d'environnement
-ENV APP_ENV=production
-ENV APP_DEBUG=false
-
-# Mettre à jour et installer les dépendances système
+# System packages and PHP extensions
 RUN apt-get update && apt-get install -y \
-    libpng-dev \
-    libjpeg-dev \
-    libfreetype6-dev \
-    libzip-dev \
-    zip \
-    unzip \
-    libonig-dev \
-    libxml2-dev \
-    && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j$(nproc) gd pdo_mysql mbstring exif pcntl bcmath zip \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    git unzip curl libpng-dev libonig-dev libxml2-dev \
+    libzip-dev libpq-dev libcurl4-openssl-dev libssl-dev \
+    zlib1g-dev libicu-dev g++ libevent-dev procps \
+    && docker-php-ext-install pdo pdo_mysql pdo_pgsql mbstring zip exif pcntl bcmath sockets intl
 
-# Installer les extensions PHP nécessaires
-RUN docker-php-ext-install pdo pdo_mysql
+# Swoole is installed from GitHub
+RUN curl -L -o swoole.tar.gz https://github.com/swoole/swoole-src/archive/refs/tags/v5.1.0.tar.gz \
+    && tar -xf swoole.tar.gz \
+    && cd swoole-src-5.1.0 \
+    && phpize \
+    && ./configure \
+    && make -j$(nproc) \
+    && make install \
+    && docker-php-ext-enable swoole
 
-# Installer et configurer OPcache
-RUN docker-php-ext-install opcache
-COPY docker/opcache.ini /usr/local/etc/php/conf.d/opcache.ini
-
-# Installer Node.js et NPM
-RUN curl -sL https://deb.nodesource.com/setup_18.x | bash - \
+# Node.js 18 (Vite compatible) and Yarn installation
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
     && apt-get install -y nodejs \
-    && npm install -g npm
+    && npm install -g yarn
 
-# Créer le répertoire de l'application
-RUN mkdir -p /var/www/html
-WORKDIR /var/www/html
+# Composer installation
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
-# Copier les fichiers de l'application
+WORKDIR /var/www
+
+# Copy composer files and artisan file
+COPY composer.json composer.lock artisan ./
+
+# Create Laravel's basic directory structure
+RUN mkdir -p bootstrap/cache storage/app storage/framework/cache/data \
+    storage/framework/sessions storage/framework/views storage/logs
+
+# Install Composer dependencies (without post-scripts)
+RUN composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist --no-scripts
+
+# Node files (cache for Vite build)
+COPY package.json yarn.lock ./
+RUN yarn install --frozen-lockfile
+
+# Copy the rest of the project files
 COPY . .
-COPY --from=build /app/vendor ./vendor
 
-# Configurer les permissions
-RUN chown -R www-data:www-data /var/www/html \
-    && chmod -R 755 /var/www/html/storage \
-    && chmod -R 755 /var/www/html/bootstrap/cache
+# Run Composer post-scripts
+RUN composer dump-autoload --optimize
 
-# Installer les dépendances frontend
-RUN npm install && \
-    npm run production && \
-    rm -rf node_modules
+# Vite build
+RUN yarn build
 
-# Optimiser l'application Laravel
-RUN php artisan config:cache && \
-    php artisan route:cache && \
-    php artisan view:cache
+# Laravel config cache (to be done at runtime, not during build)
+RUN php artisan config:clear \
+ && php artisan route:clear \
+ && php artisan view:clear
 
-# Exposer le port 9000 pour PHP-FPM
+# File permissions
+RUN chown -R www-data:www-data /var/www \
+ && chmod -R 775 /var/www/storage /var/www/bootstrap/cache
+
 EXPOSE 9000
 
-# Démarrer PHP-FPM
-CMD ["php-fpm"]
+# Startup script
+RUN echo '#!/bin/bash\n\
+# Cache configurations after environment variables are loaded\n\
+php artisan config:cache\n\
+php artisan route:cache\n\
+php artisan view:cache\n\
+# Start the server\n\
+exec php artisan octane:start --server=swoole --host=0.0.0.0 --port=9000\n\
+' > /start.sh && chmod +x /start.sh
+
+CMD ["sh", "-c", "echo 'APP_KEY:' $APP_KEY && php artisan config:cache && php artisan route:cache && php artisan view:cache && php artisan octane:start --server=swoole --host=0.0.0.0 --port=9000"]

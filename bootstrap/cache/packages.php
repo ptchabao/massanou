@@ -22,6 +22,17 @@
       'Image' => 'Intervention\\Image\\Facades\\Image',
     ),
   ),
+  'laravel/octane' => 
+  array (
+    'aliases' => 
+    array (
+      'Octane' => 'Laravel\\Octane\\Facades\\Octane',
+    ),
+    'providers' => 
+    array (
+      0 => 'Laravel\\Octane\\OctaneServiceProvider',
+    ),
+  ),
   'laravel/passport' => 
   array (
     'providers' => 
